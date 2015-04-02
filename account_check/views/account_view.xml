@@ -10,6 +10,10 @@
                     <field name="check_type" attrs="{'invisible':[('type','!=', 'bank')]}"/>
                     <field name="validate_only_checks" attrs="{'invisible':[('check_type','=', False)]}"/>
                 </field>
+                <field name="default_credit_account_id" position="after">
+                    <field name="collection_account_id" attrs="{'invisible':[('check_type','!=', 'third')],'required':[('check_type','=','third')]}"/>
+                    <field name="warrant_account_id" attrs="{'invisible':[('check_type','!=', 'third')],'required':[('check_type','=','third')]}"/>
+                </field>
                 <notebook>
                     <page string="Checkbooks" attrs="{'invisible':[('check_type','!=', 'issue')]}">
                         <field name="checkbook_ids" attrs="{'required':[('check_type', '=', 'issue')]}" context="{'default_company_id':company_id}"/>

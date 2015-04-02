@@ -139,3 +139,113 @@ class account_voucher(models.Model):
         amount = sum(x.amount for x in self.delivered_third_check_ids)
         amount += sum(x.amount for x in self.issued_check_ids)
         self.amount_readonly = amount
+
+    @api.model
+    def prepare_move_line(self, voucher_id, amount, move_id, name, company_currency, current_currency, date_due):
+        voucher = self.env['account.voucher'].browse(voucher_id)
+        exchange_rate = voucher.paid_amount_in_company_currency / voucher.amount
+        debit = credit = 0.0
+        if voucher.type in ('purchase', 'payment'):
+            credit = amount * exchange_rate
+        elif voucher.type in ('sale', 'receipt'):
+            debit = amount * exchange_rate
+        if debit < 0: credit = -debit; debit = 0.0
+        if credit < 0: debit = -credit; credit = 0.0
+        sign = debit - credit < 0 and -1 or 1
+        move_line = {
+                'name': name,
+                'debit': debit,
+                'credit': credit,
+                'account_id': voucher.account_id.id,
+                'move_id': move_id,
+                'journal_id': voucher.journal_id.id,
+                'period_id': voucher.period_id.id,
+                'partner_id': voucher.partner_id.id,
+                'currency_id': company_currency <> current_currency and  current_currency or False,
+                'amount_currency': (sign * abs(amount) # amount < 0 for refunds
+                    if company_currency != current_currency else 0.0),
+                'date': voucher.date,
+                'date_maturity': date_due or False,
+            }
+        return move_line
+
+
+    def action_move_line_create(self, cr, uid, ids, context=None):
+        '''
+        Confirm the vouchers given in ids and create the journal entries for each of them
+        '''
+        if context is None:
+            context = {}
+        move_pool = self.pool.get('account.move')
+        move_line_pool = self.pool.get('account.move.line')
+        for voucher in self.browse(cr, uid, ids, context=context):
+            local_context = dict(context, force_company=voucher.journal_id.company_id.id)
+            if voucher.move_id:
+                continue
+            company_currency = self._get_company_currency(cr, uid, voucher.id, context)
+            current_currency = self._get_current_currency(cr, uid, voucher.id, context)
+            # we select the context to use accordingly if it's a multicurrency case or not
+            context = self._sel_context(cr, uid, voucher.id, context)
+            # But for the operations made by _convert_amount, we always need to give the date in the context
+            ctx = context.copy()
+            ctx.update({'date': voucher.date})
+            # Create the account move record.
+            move_id = move_pool.create(cr, uid, self.account_move_get(cr, uid, voucher.id, context=context), context=context)
+            # Get the name of the account_move just created
+            name = move_pool.browse(cr, uid, move_id, context=context).name
+
+            # Additional move lines for check
+            if voucher.check_type:
+                if voucher.check_type == 'third':
+                    if voucher.type == 'payment':
+                        checks = voucher.delivered_third_check_ids
+                    else:
+                        checks = voucher.received_third_check_ids
+                elif voucher.check_type == 'issue':
+                    checks = voucher.issued_check_ids
+                # Calculate total
+                line_total = 0.0
+                for check in checks:
+                    bank_name = ''
+                    if check.bank_id:
+                        bank_name = '/' + check.bank_id.name
+                    move_line_id =  move_line_pool.create(cr, uid, self.prepare_move_line(cr,uid,voucher.id, check.amount,  move_id, check.name + bank_name, company_currency, current_currency, check.payment_date, local_context), local_context)
+                    move_line_brw = move_line_pool.browse(cr, uid, move_line_id, context=context)
+                    line_total += move_line_brw.debit - move_line_brw.credit
+            else:
+                # Create the first line of the voucher
+                move_line_id = move_line_pool.create(cr, uid, self.first_move_line_get(cr,uid,voucher.id, move_id, company_currency, current_currency, local_context), local_context)
+                move_line_brw = move_line_pool.browse(cr, uid, move_line_id, context=context)
+                line_total = move_line_brw.debit - move_line_brw.credit
+            rec_list_ids = []
+            if voucher.type == 'sale':
+                line_total = line_total - self._convert_amount(cr, uid, voucher.tax_amount, voucher.id, context=ctx)
+            elif voucher.type == 'purchase':
+                line_total = line_total + self._convert_amount(cr, uid, voucher.tax_amount, voucher.id, context=ctx)
+            # Create one move line per voucher line where amount is not 0.0
+            line_total, rec_list_ids = self.voucher_move_line_create(cr, uid, voucher.id, line_total, move_id, company_currency, current_currency, context)
+
+            # Create the writeoff line if needed
+            ml_writeoff = self.writeoff_move_line_get(cr, uid, voucher.id, line_total, move_id, name, company_currency, current_currency, local_context)
+            if ml_writeoff:
+                move_line_pool.create(cr, uid, ml_writeoff, local_context)
+
+            # We post the voucher.
+            self.write(cr, uid, [voucher.id], {
+                'move_id': move_id,
+                'state': 'posted',
+                'number': name,
+            })
+            if voucher.journal_id.entry_posted:
+                move_pool.post(cr, uid, [move_id], context={})
+            # We automatically reconcile the account move lines.
+            reconcile = False
+            for rec_ids in rec_list_ids:
+                if len(rec_ids) >= 2:
+                    reconcile = move_line_pool.reconcile_partial(cr, uid, rec_ids, writeoff_acc_id=voucher.writeoff_acc_id.id, writeoff_period_id=voucher.period_id.id, writeoff_journal_id=voucher.journal_id.id)
+        return True
+
+
+
+
+
