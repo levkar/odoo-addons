@@ -33,7 +33,7 @@ class product_template(models.Model):
         for product in self:
             if product.sale_price_currency_id != company_currency:
                 cia_currency_list_price = product.sale_price_currency_id.compute(
-                    product.list_price, company_currency)
+                    product.list_price, company_currency, round=False)
             else:
                 cia_currency_list_price = product.list_price
             product.cia_currency_list_price = cia_currency_list_price
@@ -54,6 +54,6 @@ class product_template(models.Model):
                 if product.sale_price_currency_id.id != price_type_currency_id:
                     res[product.id] = self.pool.get('res.currency').compute(
                         cr, uid, product.sale_price_currency_id.id,
-                        price_type_currency_id, res[product.id],
+                        price_type_currency_id, res[product.id], round=False,
                         context=context)
         return res
